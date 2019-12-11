@@ -1,0 +1,420 @@
+---
+title: "Google App store success prediction"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing these chunks by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+
+**Load packages**
+```{r Load packages}
+install.packages('tidyverse')
+install.packages('highcharter')
+install.packages('lubridate')
+install.packages('stringr')
+install.packages('xts')
+install.packages('magrittr')
+install.packages('deplyr')
+install.packages('caretEnsemble')
+install.packages('psych')
+install.packages('Amelia')
+install.packages('mice')
+install.packages('GGally')
+install.packages('rpart')
+install.packages('normalr')
+install.packages('cluster')
+install.packages('HSAUR')
+install.packages('fpc')
+install.packages('e1071')
+install.packages('klaR')
+install.packages('caret')
+install.packages('MASS')
+install.packages('randomForest')
+install.packages('class')
+library(tidyverse)
+library(highcharter) 
+library(lubridate)
+library(stringr)
+library(xts)
+library(magrittr)
+library(dplyr)
+library(caretEnsemble)
+library(psych)
+library(Amelia)
+library(mice)
+library(GGally)
+library(rpart)
+library(normalr)
+library(cluster)
+library(HSAUR)
+library(fpc)
+library(e1071)
+library(klaR)
+library(caret)
+library(MASS)
+library(randomForest)
+library(class)
+```
+**Load data**
+```{r Load data}
+dataOriginal = read.csv("Google-Playstore-Full-orig.csv")
+data = dataOriginal[,]
+str(data)
+```
+**Data preprocessing**
+```{r Data preprocessing}
+data.clean <- data %>%
+  mutate(
+    # Transform reviews to numeric
+    Reviews = as.numeric(Reviews),
+    # Remove currency symbol from Price, change it to numeric
+    Price = as.numeric(gsub("\\$", "", as.character(Price))),
+    Type=ifelse(Price==0, 0, Price),
+    Type=as.factor(ifelse(Price != 0, 1, Price)),
+    # Eliminate some characters to transform Installs to numeric
+    Installs = gsub("\\+", "", as.character(Installs)),
+    Installs = as.numeric(gsub(",", "", Installs)),
+    # Eliminate M to transform Size to numeric
+    Size = gsub("M", "", Size),
+    # Replace cells with k to 0 since it is < 1MB
+    Size = ifelse(grepl("k", Size), 1, as.numeric(Size)),
+    Size = gsub("Varies with device", NA, Size),
+    # Last Updated to date format
+    Last.Updated = dmy(Last.Updated),
+    # Replace "Varies with device" to NA since it is unknown
+    Min.Android.Ver = gsub("Varies with device", NA, Minimum.Version),
+    # Keep only version number to 1 decimal
+    Min.Android.Ver = as.numeric(substr(Min.Android.Ver, start = 1, stop = 2)),
+    # Drop old Android version column
+    Minimum.Version = NULL
+  )
+data.clean %>%
+    summarise_all(
+        funs(sum(is.na(.)))
+    ) %>%
+  gather() %>%
+  # Only show columns with NA
+  filter(value> 1) %>%
+  arrange(-value) %>%
+    hchart('column', hcaes(x = 'key', y = 'value', color = 'key')) %>%
+  hc_add_theme(hc_theme_elementary()) %>%
+  hc_title(text = "Columns with NA values")
+```
+**Clustering with value 3**
+```{r Clustering with k as 3}
+data <- na.omit(data.clean)
+normalize <- function(x) {
+  x1 <- ((x - min(x)) / (max(x) - min(x))) * 4
+  x1 <- x1 + 1
+  return (x1)
+}
+#normalization of data
+data$Size = as.numeric(data$Size)
+data$Reviews = normalize(data$Reviews)
+data$Installs = normalize(data$Installs)
+set.seed(12345)
+#k means clustering by using 3 main features taken via feature importance
+k<-kmeans(data[,3:5],centers = 3, iter.max = 20, nstart = 1)
+k$centers
+clusterTable<-table(k$cluster)
+data$classLabel = k$cluster
+data$classLabel <- as.factor(data$classLabel)
+clusterTable
+```
+**clustering plot**
+```{r Cluster plot}
+plotcluster(data[,3:5], k$cluster)
+```
+**feature importance calculation**
+```{r Calculate feature importance}
+#Removed 1st(Application name) and 10th(latest version) column, 
+#both the columns has more than 53 categories as a factor class, 
+#because of which meanDecreaseGini can not be calculated - library limitation
+columns = c(2,3,4,5,6,8,9,11,12,13)
+dataNew = na.omit(data[,columns])
+fit_rf = randomForest(classLabel~., data=dataNew)
+importance(fit_rf)
+```
+**Naive bayes without cross validation and feature selection**
+```{r Naive bayes without CV and FS}
+split = 0.6
+dataForNaiveBayes = data
+set.seed(123)
+trainIndex <- sample(nrow(dataForNaiveBayes), split*nrow(dataForNaiveBayes), replace = FALSE)
+data_train <- dataForNaiveBayes[ trainIndex,]
+data_test <- dataForNaiveBayes[-trainIndex,]
+modelNBfun = naiveBayes(classLabel ~ ., data_train)
+predictionNB = predict(modelNBfun, data_test)
+confusionMatrix(predictionNB, data_test$classLabel)
+```
+**Naive bayes with cross validation**
+```{r Naive bayes with CV}
+data_train <- na.omit(dataForNaiveBayes[ trainIndex,])
+data_test <- na.omit(dataForNaiveBayes[-trainIndex,])
+#Latest.updated and Latest.version has been removed, library limitation
+#can not use features with factor level more than 53 categories
+col <-c(2,3,4,5,6,7,8,11,12)
+x<-data_train[,col]
+y<-data_train$classLabel
+modelNB = train(x,y,'nb',trControl=trainControl(method='cv',number=10))
+predictionNB = predict(modelNB, data_test[,-13])
+confusionMatrix(predictionNB, data_test$classLabel)
+```
+**Naive bayes with cross validation and feature selection**
+```{r Naive bayes with CV and FS}
+data_train <- na.omit(dataForNaiveBayes[ trainIndex,])
+data_test <- na.omit(dataForNaiveBayes[-trainIndex,])
+#feature selection - removed content.rating and type - low feature importance
+col <-c(2,3,4,5,6,7,12)
+x<-data_train[,col]
+y<-data_train$classLabel
+modelNB = train(x,y,'nb',trControl=trainControl(method='cv',number=10))
+predictionNB = predict(modelNB, data_test[,-13])
+confusionMatrix(predictionNB, data_test$classLabel)
+```
+**Random forest without cross validation and feature selection**
+```{r Random forest without CV and FS}
+dataForRandomForest = dataNew
+trainIndex <- sample(nrow(dataForRandomForest), split*nrow(dataForRandomForest), replace = FALSE)
+data_train <- dataForRandomForest[ trainIndex,]
+data_test <- dataForRandomForest[-trainIndex,]
+modelRFfun = randomForest(classLabel ~ .,data_train)
+predictions <- predict(modelRFfun, data_test)
+confusionMatrix(predictions, data_test$classLabel)
+```
+**Clustering with k=7**
+```{r Clustering with k as 7}
+datawith7 <- data
+set.seed(12345)
+#calculated clustering solution with optimal value k=7
+k<-kmeans(datawith7[,3:5],centers = 7, iter.max = 20, nstart = 1)
+k$centers
+clusterTable<-table(k$cluster)
+datawith7$classLabel = k$cluster
+datawith7$classLabel <- as.factor(datawith7$classLabel)
+clusterTable
+```
+**Plot clusters**
+```{r Plot for k as 7}
+plotcluster(datawith7[,3:5], k$cluster)
+```
+**Naive bayes with 7 clusters as class labels without CV and feature selection**
+```{r Naives bayes with 7clusters}
+dataForNaiveBayesFor7 <- datawith7
+set.seed(123)
+trainIndex <- sample(nrow(dataForNaiveBayesFor7), split*nrow(dataForNaiveBayesFor7), replace = FALSE)
+data_train <- na.omit(dataForNaiveBayesFor7[ trainIndex,])
+data_test <- na.omit(dataForNaiveBayesFor7[-trainIndex,])
+#Latest.updated and Latest.version has been removed, library limitation
+modelNBfunFor7 = naiveBayes(classLabel ~ ., data_train)
+predictionNB = predict(modelNBfunFor7, data_test)
+confusionMatrix(predictionNB, data_test$classLabel)
+```
+**Naive bayes with cross validation for 7 cluster value**
+```{r Naive bayes with CV for k as 7}
+#application name, (1st), Latest.updated(9th) and Latest.version(10th) has been removed, library limitation
+col <-c(2,3,4,5,6,7,8,11,12)
+x<-data_train[,col]
+y<-data_train$classLabel
+modelNBF7 = train(x,y,'nb',trControl=trainControl(method='cv',number=10))
+predictionNBF7 = predict(modelNBF7, data_test[,-13])
+confusionMatrix(predictionNBF7, data_test$classLabel)
+```
+**Random forest for 7clusters**
+```{r Random forest with k as 7}
+#9th column(Last.updated) can be added again, as date format works in random forest.
+columns = c(2,3,4,5,6,8,9,11,12,13)
+dataForRandomForestFor7 = datawith7[,columns]
+trainIndex <- sample(nrow(dataForRandomForestFor7), split*nrow(dataForRandomForestFor7), replace = FALSE)
+data_train <- dataForRandomForestFor7[ trainIndex,]
+data_test <- dataForRandomForestFor7[-trainIndex,]
+modelRFfun = randomForest(classLabel ~ .,data_train)
+predictions <- predict(modelRFfun, data_test)
+confusionMatrix(predictions, data_test$classLabel)
+```
+**K nearest neighbor**
+```{r KNN}
+#KNN requires all numeric features, hence all important features have been considered for this algorithm.
+dataForKNNFor7 = datawith7
+dataForKNNFor7$Category = as.numeric(dataForKNNFor7$Category)
+columns <- c(2,3,4,5,6,13)
+dataForKNNFor7 = dataForKNNFor7[,columns]
+trainIndex <- sample(nrow(dataForKNNFor7), split*nrow(dataForKNNFor7), replace = FALSE)
+data_train <- na.omit(dataForKNNFor7[ trainIndex,])
+data_test <- dataForKNNFor7[-trainIndex,]
+predictions = knn(data_train, data_test,cl=data_train$classLabel,k=11)
+confusionMatrix(predictions, data_test$classLabel)
+```
+**Popular categories with respect to number of installs**
+```{r Popular Category wrt NumOfInstalls}
+graphData <- data.clean
+graphData %>%
+  count(Category, Installs) %>%
+  group_by(Category) %>%
+  summarize(
+    TotalInstalls = sum(as.numeric(Installs))
+  ) %>%
+  arrange(-TotalInstalls) %>%
+  hchart('scatter', hcaes(x = "Category", y = "TotalInstalls", size = "TotalInstalls", color = "Category")) %>%
+  hc_add_theme(hc_theme_538()) %>%
+  hc_title(text = "Most popular categories (# of installs)")
+```
+**Popular category with respect to average rating**
+```{r Categories wrt mean rating}
+graphData %>%
+  count(Category, Rating) %>%
+  group_by(Category) %>%
+  summarize(
+    Rating = mean(Rating)
+  ) %>%
+  arrange(-Rating) %>%
+  hchart('scatter', hcaes(x = "Category", y = "Rating", size = "Rating", color = "Category")) %>%
+  hc_add_theme(hc_theme_538()) %>%
+  hc_title(text = "Categories with their mean rating")
+```
+**Distribution of application size**
+```{r Dist of app size}
+graphData %>%
+  count(Size) %>%
+  hchart('area', hcaes(x = "Size", y = "n")) %>%
+  hc_colors("#fb4901") %>%
+  hc_add_theme(hc_theme_ffx()) %>%
+  hc_title(text = "Distribution of application size (in MB)")
+```
+**Number of applications for each installation category**
+```{r NumOfApp for each InstallationCat}
+tmp <- graphData %>%
+  group_by(
+    Installs.Group = cut(Installs, breaks= seq(0, 1000000000, by = 10000))
+    ) %>% 
+  summarise(
+    n= n()
+    )
+
+highchart() %>%
+  hc_chart(
+    type = "pie"
+    ) %>%
+  hc_add_series_labels_values(
+    labels = tmp$Installs.Group, values = tmp$n
+    ) %>%
+  hc_title(
+    text="Number of installs (groups per 10k)"
+    ) %>%
+  hc_add_theme(hc_theme_economist())
+```
+**Percentage of paid vs free applications**
+```{r Paid per free apps}
+tmp <- graphData %>%
+  count(Type) %>%
+  mutate(perc = round((n /sum(n))*100)) %>%
+  arrange(desc(perc))
+
+    hciconarray(tmp$Type, tmp$perc, icons = "android", size = 5) %>%
+  hc_title(text="Percentage of paid vs free apps")
+```
+**Percentage of paid vs free applications per category**
+```{r Per of paid vs free by cat}
+graphData %>% 
+  group_by(Category, Type) %>%
+  summarize(
+    n = n()
+  ) %>%
+  mutate(perc = round((n /sum(n))*100)) %>%
+  hchart('bar', hcaes(x = 'Category', y = 'perc', group = 'Type')) %>%
+  hc_plotOptions(series=list(stacking='normal')) %>%
+  hc_title(text="Percentage of Free vs Paid by Category") %>%
+  hc_add_theme(hc_theme_flat())
+```
+**Median price per category**
+```{r Price per category}
+graphData %>%
+  filter(Type == 1) %>%
+  group_by(Category) %>%
+  summarize(
+    Price = median(Price)
+  ) %>%
+  arrange(-Price) %>%
+  hchart('treemap', hcaes(x = 'Category', value = 'Price', color = 'Price')) %>%
+  hc_add_theme(hc_theme_elementary()) %>%
+  hc_title(text="Median price per category")
+```
+**Total revenue generated by each category**
+```{r Revenu generated}
+graphData %>%
+  filter(Type == 1) %>%
+  mutate(
+    Total.Paid = Price * Installs
+  ) %>%
+  group_by(Category) %>%
+  summarize(USD.Paid = sum(Total.Paid)) %>%
+  arrange(-USD.Paid) %>%
+  hchart('treemap', hcaes(x = 'Category', value = 'USD.Paid', color = 'USD.Paid')) %>%
+  hc_add_theme(hc_theme_elementary()) %>%
+  hc_title(text="Total amount spent by category (installs * price)")
+```
+**Number of installation by audience**
+```{r Number of installs by age}
+tmp <- graphData %>%
+  group_by(Content.Rating) %>%
+  summarize(Total.Installs = sum(Installs)) %>%
+  arrange(-Total.Installs)
+highchart() %>% 
+  hc_chart(type ="column",
+           options3d = list(enabled = TRUE, alpha = 15, beta = 15)) %>%
+  hc_xAxis(categories = tmp$Content.Rating) %>% 
+  hc_add_series(data = tmp$Total.Installs, name = "Total.Installs") %>%
+  hc_add_theme(hc_theme_smpl()) %>%
+  hc_title(
+    text="Number of Installs by audience (all apps)"
+    ) %>%
+    hc_chart(
+      borderColor = '#EBBA95',
+      borderRadius = 10,
+      borderWidth = 1,
+      backgroundColor = list(
+        linearGradient = c(0, 0, 500, 500), stops = list(
+               list(0, 'rgb(255, 255, 255)'),
+               list(1, 'rgb(180, 180, 255)')
+             )))
+```
+**number of applications by last updated date**
+```{r Last updated date }
+tmp <- graphData %>% count(Last.Updated)
+
+# Transform data into time series
+time_series <- xts(
+  tmp$n, order.by = tmp$Last.Updated 
+)
+
+highchart(type = "stock") %>% 
+  hc_title(text = "Last updated date") %>% 
+  hc_subtitle(text = "Number of applications by date of last update") %>% 
+  hc_add_series(time_series) %>%
+  hc_add_theme(hc_theme_gridlight())
+
+rm(time_series)
+```
+**Number of installation per Minimum android version with respect to application type**
+```{r Min android ver}
+graphData %>%
+ filter(Min.Android.Ver > 0, Type %in% c(0, 1)
+   ) %>%
+ group_by(as.factor(Min.Android.Ver), Type) %>%
+ rename(Minimum.Android.Version = "as.factor(Min.Android.Ver)") %>%
+ summarize(Total.Installs = sum(Installs)) %>%
+ hchart(
+   type = "heatmap", hcaes(x = Minimum.Android.Version, y = Type, value = Total.Installs)
+   ) %>%
+ hc_title(text = "Minimum Android Version (by number of installs)")
+```
+**Top 10 applications**
+```{r Top 10app}
+graphData %>%
+    dplyr::select(App.Name, Installs, Category) %>%
+    arrange(-Installs) %>%
+    head(10)
+```
+
